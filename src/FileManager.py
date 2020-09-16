@@ -1,40 +1,226 @@
-import shutil
 import os
-import git
 import json
+import git
+import shutil
 
-MAX_DEPTH = 3
-IGNORE_GIT_REPOSITORIES = True
+import tarfile
+import rarfile
+import zipfile
 
-#rules = [{"target" : "type", "arg" : "image", "action" : {"func" : "action_print"}}]
-# rules = [{"target" : "in_name", "arg" : "zombie", "action" : {"func" : "action_print"}}]
-# rules = [{"target" : "ext", "arg" : "jpg", "action" : {"func" : "action_print"}}]
-rules = [{"target" : "postfix", "arg" : "Face", "action" : {"func" : "action_print"}}]
+import logging
 
-class FileManager(object):
+log = logging.getLogger(__name__)
 
-    def __init__(self, rules):
-        self.rules = rules
+class MixinActions:
+    def _first_unique_path(self, filepath, new_name=None):
+        filename, _, _ = self._split_fullpath(filepath)
+        attempts = 0
+
+        if not new_name:
+            new_name = filename
+
+        def construct_path(attempts):
+            _name , _ext, _remainder = self._split_fullpath(new_name)
+
+            _ext = f".{_ext}" if _ext else ""
+
+            if attempts:
+                return f"{_remainder}{_name} ({attempts}){_ext}"
+            else:
+                return new_name
+
+        new_path = construct_path(None)
+
+        while(os.path.exists(new_path)):
+            attempts += 1
+            new_path = construct_path(attempts)
+
+        return new_path
+        
+    def _rename(self, filepath, new_name):
+        if self._is_aggragate_name(new_name):
+            new_name = self._name_to_path(filepath, new_name)
+        
+        os.rename(filepath, self._first_unique_path(filepath, new_name))
+
+    def _delete(self, filepath):
+        if os.path.isdir(filepath):
+            shutil.rmtree(filepath)
+        else:
+            os.remove(filepath)
+
+    def Delete(self):
+        for filepath in self:
+            self._delete(filepath)
+
+        log.warning(f"Removed files '{self}'")
+
+    def Rename(self, new_name):
+        for filepath in self:
+            self._rename(filepath, new_name)
+
+    def Move(self, new_path):
+        if self._is_aggragate_name(new_path):
+                new_path = self._name_to_path(filepath, new_path)
+
+        for filepath in self:
+            shutil.move(filepath, new_path)
+
+    def Unzip(self, to_path=None, delete_original=False):
+        for filepath in self:
+            was_extracted = False
+
+            new_path = to_path if to_path else self._get_base_path(filepath)
+
+            if self._is_aggragate_name(new_path):
+                new_path = self._name_to_path(filepath, new_path)
+
+            if tarfile.is_tarfile(filepath):
+                with tarfile.open(filepath) as tar_file:
+                    tar_file.extractall(new_path)
+                
+                was_extracted = True
+                
+            elif zipfile.is_zipfile(filepath):
+                with zipfile.ZipFile(filepath, 'r') as zip_file:
+                    zip_file.extractall(new_path)
+        
+                was_extracted = True
+
+            elif rarfile.is_rarfile(filepath):
+                with rarfile.open(filepath) as rar_file:
+                    rar_file.extractall(new_path)
+        
+                was_extracted = True
+            
+            
+            if was_extracted == True:
+                if delete_original:
+                    self._delete(filepath)
+            else:
+                log.warning(f"Could not detect archive type of '{filepath}'")
+
+
+class MixinTargets:
+    def _extension(self, fullpath):
+        _, ext, _ = self._split_fullpath(fullpath)
+        
+        return ext
+
+    def _type(self, fullpath):
+        _, ext, _ = self._split_fullpath(fullpath)
+
+        for ext_type in self.extensions:
+            if ext in self.extensions[ext_type]:
+                return ext_type
+
+    def _substring(self, fullpath, substring, case_sensitive):
+        name, _, _ = self._split_fullpath(fullpath)
+
+        if case_sensitive and name.find(substring) != -1:
+            return True
+        
+        elif not case_sensitive and name.lower().find(substring.lower()) != -1:
+            return True
+
+        return False
+
+    def _prefix(self, fullpath, substring, case_sensitive):
+        name, _, _ = self._split_fullpath(fullpath)
+
+        l = len(substring)
+        if case_sensitive and name[0:l] == substring:
+            return True
+
+        elif not case_sensitive and name[0:l].lower() == substring.lower():
+            return True
+
+        return False
+
+    def _postfix(self, fullpath, substring, case_sensitive):
+        name, _, _ = self._split_fullpath(fullpath)
+
+        l = len(substring)
+        if case_sensitive and name[-l:] == substring:
+            return True
+
+        elif not case_sensitive and name[-l:].lower() == substring.lower():
+            return True
+
+        return False
+
+    def _isGit(self, fullpath):
+        try:
+            _ = git.Repo(fullpath).git_dir
+            return True
+        except git.exc.InvalidGitRepositoryError:
+            return False
+
+    def Extension(self, other):
+        return DirectoryFiles([x for x in self if self._extension(x) == other])
+
+    def ExtenstionType(self, other):
+        return DirectoryFiles([x for x in self if self._type(x) == other])
+    
+    def Substring(self, other, case_sensitive=True):
+        return DirectoryFiles([x for x in self if self._substring(x, other, case_sensitive)])
+
+    def Prefix(self, other, case_sensitive=True):
+        return DirectoryFiles([x for x in self if self._prefix(x, other, case_sensitive)])
+
+    def Postfix(self, other, case_sensitive=True):
+        return DirectoryFiles([x for x in self if self._postfix(x, other, case_sensitive)])
+
+    def IsDirectory(self, other=True):
+        return DirectoryFiles([x for x in self if os.path.isdir(x) is other])
+
+    def IsGit(self, other=True):
+        # Slow
+        return DirectoryFiles([x for x in self if (other is True and os.path.isdir(x) and self._isGit(x)) or (other is False and not self._isGit(x))])
+
+class DirectoryFiles(list, MixinTargets, MixinActions):
+    def __init__(self, *arg, **kwargs):
 
         with open("extensions.json", 'r') as myfile:
             data=myfile.read()
 
         self.extensions = json.loads(data)
-    
-    def moveFile(self, from_path, to_path):
-        shutil.move(from_path, to_path)
+        self.directory_path = None
 
-    def file_is_correctly_located(self, path):
-        pass
+        super(DirectoryFiles, self).__init__(*arg, **kwargs)
 
-    def is_git_repository(self, full_path):
-        try:
-            _ = git.Repo(full_path).git_dir
-            return True
-        except git.exc.InvalidGitRepositoryError:
-            return False
+    @classmethod
+    def from_directory(cls, path):
+        cls = DirectoryFiles([f"{path}{x}" for x in os.listdir(path)])
+        cls.directory_path = path
+        return cls
 
-    def _sanatize_file_extension(self, ext):
+    def _is_aggragate_name(self, name):
+        return (name[0] == "*")
+
+    def _get_base_path(self, filepath):
+        if self.directory_path:
+            return self.directory_path
+        else:
+            return "/".join(filepath.split("/")[:-1]) + "/"
+
+    def _name_to_path(self, filepath, name):
+        base_path = self._get_base_path(filepath)
+        
+        if os.path.isfile(filepath):
+            _, ext, _ = self._split_fullpath(filepath)
+        
+        ext = f".{ext}" if ext else ""
+
+        if self._is_aggragate_name(name):
+            name = name[1:]
+
+        if base_path[-1] == "/":
+            return base_path + name + ext
+        else:
+            return f"{base_path}/{name}{ext}"
+
+    def _sanatize_extension(self, ext):
         if not ext:
             return ""
         legal_characters = {"."}
@@ -46,120 +232,13 @@ class FileManager(object):
         
         return ext.lower()
 
-    def iterate_directory(self, path):
-        for file in os.listdir(path):
-            filename, extention = os.path.splitext(file)
-            fullpath = f'{path}{file}' if path[:-1] == "/" else f'{path}/{file}'
-            
-            yield filename, self._sanatize_file_extension(extention), fullpath
+    def _split_fullpath(self, fullpath):
+        path, ext = os.path.splitext(fullpath)
+        filename = path.split("/")[-1]
+
+        return filename, self._sanatize_extension(ext), "/".join(fullpath.split("/")[:-1]) + "/"
+
     
-    def run(self, path):
-        iterator = self.iterate_directory(path)
-
-        for name, ext, path in iterator:
-            self.action(name, ext, path)
-
-    def action(self, name, ext, path):
-        for rule in self.rules:
-            target = rule["target"]
-            
-            # type
-            if target == "type":
-                if rule["arg"] in self.extensions:
-                    if ext in self.extensions[rule["arg"]]:
-                        action = getattr(self, rule["action"]["func"])
-                        action(name, ext, path)
-
-                        continue
-
-            # extension
-            if target == "ext":
-                if rule["arg"] == ext:
-                    action = getattr(self, rule["action"]["func"])
-                    action(name, ext, path)
-
-                    continue
-
-            # prefix of name
-            if target == "prefix":
-                l = len(rule["arg"])
-                if name[0:l] == rule["arg"]:
-                    action = getattr(self, rule["action"]["func"])
-                    action(name, ext, path)
-
-                continue
-
-            # postfix of name
-            if target == "postfix":
-                l = len(rule["arg"])
-                if name[-l:] == rule["arg"]:
-                    action = getattr(self, rule["action"]["func"])
-                    action(name, ext, path)
-
-                continue
-
-            # in name
-            if target == "in_name":
-                if (name.lower().find(rule["arg"].lower()) != -1):
-                    action = getattr(self, rule["action"]["func"])
-                    action(name, ext, path)
-
-                continue
-
-
-    def action_print(self, name, ext, path):
-        print(path)
-    
-    
-    # def iterate_directory(self, path, depth):
-    #     known_types = set({})
-    #     directories = {0: [path]}
-    #     repositories = []
-
-    #     for i in range(0, depth):
-    #         directories[i+1] = []
-    #         for directory in directories[i]:
-    #             directory = directory if directory[:-1] == "/" else directory + "/"
-    #             for file in os.listdir(directory):
-    #                 # print(file)
-    #                 fullpath = f'{directory}{file}'
-                    
-    #                 filename, file_extension = os.path.splitext(file)
-    #                 is_directory = os.path.isdir(fullpath)
-
-
-    #                 if file_extension and not is_directory:
-    #                     file_extension = self._sanatize_file_extension(file_extension)
-
-    #                 if file_extension not in known_types and os.path.isfile(fullpath) and not is_directory:
-    #                     known_types.add(file_extension)
-                    
-                    
-    #                 elif is_directory:
-    #                     if IGNORE_GIT_REPOSITORIES and self.is_git_repository(fullpath):
-    #                         repositories.append(fullpath)
-    #                     else:
-    #                         directories[i+1].append(fullpath)
-
-
-    #         # if file_extension not in known_types and os.path.isfile(f"{directory}{filename}"):
-    #         #     known_types.add(file_extension)
-    #         #     print("extension: " + file_extension)
-    #         # elif os.path.isdir(f"{directory}{filename}"):
-    #         #     print("directory: " + file_extension)
-
-    #     print(directories)
-    #     # print(repositories)
-
 if __name__ == "__main__":
-    fm = FileManager(rules)
-
-    fm.run("/media/ulvfoerlev/DATA/Users/OccultEyes/Documents")
-
-    # for name, ext, path in fm.iterate_directory("/media/ulvfoerlev/DATA/Users/OccultEyes/Documents"):
-    #     print(f"{name}, {ext}, {path}")
-
-#     .blp
-
-# os.path.isdir(fpath)
-# os.path.isfile(fpath)
+    df = DirectoryFiles.from_directory("/home/ulvfoerlev/Documents/")
+    df.ExtenstionType("archive").Rename("*Azathoth")
