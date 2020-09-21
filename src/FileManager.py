@@ -2,6 +2,7 @@ import os
 import json
 import git
 import shutil
+import filecmp
 
 import tarfile
 import rarfile
@@ -12,6 +13,9 @@ import logging
 log = logging.getLogger(__name__)
 
 class MixinActions:
+    def _compare(self, filepath1, filepath2,  shallow = False):
+        return filecmp.cmp(filepath1, filepath2, shallow=shallow)
+
     def _first_unique_path(self, filepath, new_name=None):
         filename, _, _ = self._split_fullpath(filepath)
         attempts = 0
@@ -32,6 +36,9 @@ class MixinActions:
         new_path = construct_path(None)
 
         while(os.path.exists(new_path)):
+            if _compare(filepath, new_path):
+                break
+            
             attempts += 1
             new_path = construct_path(attempts)
 
@@ -108,7 +115,7 @@ class MixinTargets:
         return ext
 
     def _type(self, fullpath):
-        _, ext, _ = self._split_fullpath(fullpath)
+        _, ext, _ = self._split_fullpath(fullpath) #no-q
 
         for ext_type in self.extensions:
             if ext in self.extensions[ext_type]:
@@ -178,7 +185,7 @@ class MixinTargets:
         # Slow
         return DirectoryFiles([x for x in self if (other is True and os.path.isdir(x) and self._isGit(x)) or (other is False and not self._isGit(x))])
 
-class DirectoryFiles(list, MixinTargets, MixinActions):
+class DirectoryFiles(list, MixinTargets, MixinActions, MixinValidation):
     def __init__(self, *arg, **kwargs):
 
         with open("extensions.json", 'r') as myfile:
